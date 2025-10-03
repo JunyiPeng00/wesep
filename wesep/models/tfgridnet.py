@@ -246,7 +246,7 @@ class TFGridNet(nn.Module):
 
         batch = self.conv(batch)  # [B, -1, T, F]
 
-        predict_speaker_lable = torch.tensor(0.0).to(
+        predict_speaker_label = torch.tensor(0.0).to(
             spk_emb_input.device)  # dummy
         if self.joint_training:
             if not self.spk_feat:
@@ -264,7 +264,7 @@ class TFGridNet(nn.Module):
                 spk_emb_input = tmp_spk_emb_input[-1]
             else:
                 spk_emb_input = tmp_spk_emb_input
-            predict_speaker_lable = self.pred_linear(spk_emb_input)
+            predict_speaker_label = self.pred_linear(spk_emb_input)
 
         spk_embedding = self.spk_transform(spk_emb_input)  # [B, D]
         spk_embedding = spk_embedding.unsqueeze(1).unsqueeze(3)  # [B, 1, D, 1]
@@ -299,7 +299,7 @@ class TFGridNet(nn.Module):
         # batch = [batch[:, src] for src in range(self.num_spk)]
         batch = batch.squeeze(1)
 
-        return batch, predict_speaker_lable
+        return batch, predict_speaker_label
 
     @property
     def num_spk(self):
