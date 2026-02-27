@@ -1,0 +1,90 @@
+dataloader_args:
+  batch_size: 4
+  drop_last: true
+  num_workers: 6
+  pin_memory: false
+  prefetch_factor: 6
+
+dataset_args:
+  resample_rate: &sr 16000
+  sample_num_per_epoch: 0
+  shuffle: true
+  shuffle_args:
+    shuffle_size: 2500
+  chunk_len: 48000
+  speaker_feat: &speaker_feat True
+  fbank_args:
+    num_mel_bins: 80
+    frame_shift: 10
+    frame_length: 25
+    dither: 1.0
+  noise_lmdb_file: './data/musan/lmdb'
+  noise_prob: 0               # prob to add noise aug per sample
+  specaug_enroll_prob: 0      # prob to apply SpecAug on fbank of enrollment speech
+  reverb_enroll_prob: 0       # prob to add reverb aug on enrollment speech
+  noise_enroll_prob: 0        # prob to add noise aug on enrollment speech
+
+enable_amp: false
+exp_dir: exp/WavLMTasNet
+gpus: '0,1'
+log_batch_interval: 100
+
+loss: SISDR
+loss_args: { }
+
+# For joint training with speaker encoder + CE, see README example:
+# loss: [SISDR, CE]
+# loss_args:
+#   loss_posi: [[0],[1]]
+#   loss_weight: [[1.0],[1.0]]
+
+model:
+  tse_model: WavLMTasNet
+model_args:
+  tse_model:
+    # ------------- WavLM Frontend -------------
+    wavlm_name: wavlm_base
+    wavlm_ckpt: /Users/pengjy/Interspeech2026/DynamicPruning/wespeaker_hubert/examples/voxceleb/v4_pruning/convert/wavlm_base.hf.pth
+    wavlm_frozen: true
+
+    # ------- TasNet DeepEncoder/DeepDecoder ----
+    encoder_dim: 512           # N
+    bottleneck_dim: 256        # B
+    kernel_size: 320           # 20 ms @ 16 kHz
+    stride: 160                # 10 ms @ 16 kHz
+
+    # -------- Separator / Speaker TCN ---------
+    sep_tcn_channels: 256
+    spk_emb_dim: 256
+
+    # Placeholder flags for dataset/training script compatibility
+    joint_training: false
+    multi_task: false
+
+model_init:
+  tse_model: null
+
+num_avg: 5
+num_epochs: 150
+
+optimizer:
+  tse_model: Adam
+optimizer_args:
+  tse_model:
+    lr: 0.001            # Effective initial lr is set by scheduler_args
+    weight_decay: 0.0001
+
+clip_grad: 5.0
+save_epoch_interval: 1
+
+scheduler:
+  tse_model: ExponentialDecrease
+scheduler_args:
+  tse_model:
+    final_lr: 2.5e-05
+    initial_lr: 0.001
+    warm_from_zero: false
+    warm_up_epoch: 0
+
+seed: 42
+
