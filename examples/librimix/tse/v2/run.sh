@@ -14,14 +14,15 @@ fs=16k
 min_max=min
 noise_type="clean"
 data_type="shard" # shard/raw
-Libri2Mix_dir=/YourPATH/librimix/Libri2Mix
+Libri2Mix_dir=/share5/users/dream.peng/Data/Librispeech/Librimix_Data/Libri2Mix
 mix_data_path="${Libri2Mix_dir}/wav${fs}/${min_max}"
 
 # Training related
-gpus="[0]"
+gpus=[1,2]
 use_gan_loss=false
 config=confs/bsrnn.yaml
-exp_dir=exp/BSRNN/no_spk_transform-multiply_fuse
+config=confs/wavlm_tasnet.yaml
+exp_dir=exp/wavlm_tasnet_v2/baseline
 if [ -z "${config}" ] && [ -f "${exp_dir}/config.yaml" ]; then
   config="${exp_dir}/config.yaml"
 fi
@@ -36,7 +37,7 @@ use_dnsmos=true
 dnsmos_use_gpu=true
 
 # Model average related
-num_avg=10
+num_avg=5
 
 . tools/parse_options.sh || exit 1
 
@@ -46,10 +47,8 @@ if [ ${stage} -le 1 ] && [ ${stop_stage} -ge 1 ]; then
     --data ${data} \
     --noise_type ${noise_type} \
     --stage 1 \
-    --stop-stage 3
+    --stop-stage 2
 fi
-
-data=${data}/${noise_type}
 
 if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
   echo "Covert train and test data to ${data_type}..."
@@ -59,8 +58,8 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
       --num_threads 16 \
       --prefix shards \
       --shuffle \
-      ${data}/$dset/wav.scp ${data}/$dset/utt2spk \
-      ${data}/$dset/shards ${data}/$dset/shard.list
+      ${data}/$noise_type/$dset/wav.scp ${data}/$noise_type/$dset/utt2spk \
+      ${data}/$noise_type/$dset/shards ${data}/$noise_type/$dset/shard.list
   done
 fi
 
@@ -84,13 +83,13 @@ if [ ${stage} -le 3 ] && [ ${stop_stage} -ge 3 ]; then
     --gpus $gpus \
     --num_avg ${num_avg} \
     --data_type "${data_type}" \
-    --train_data ${data}/train-100/${data_type}.list \
-    --train_utt2spk ${data}/train-100/single.utt2spk \
-    --train_spk2utt ${data}/train-100/spk2enroll.json \
-    --val_data ${data}/dev/${data_type}.list \
-    --val_spk1_enroll ${data}/dev/spk1.enroll \
-    --val_spk2_enroll ${data}/dev/spk2.enroll \
-    --val_spk2utt ${data}/dev/single.wav.scp \
+    --train_data ${data}/$noise_type/train-100/${data_type}.list \
+    --train_utt2spk ${data}/$noise_type/train-100/single.utt2spk \
+    --train_spk2utt ${data}/$noise_type/train-100/spk2enroll.json \
+    --val_data ${data}/$noise_type/dev/${data_type}.list \
+    --val_spk1_enroll ${data}/$noise_type/dev/spk1.enroll \
+    --val_spk2_enroll ${data}/$noise_type/dev/spk2.enroll \
+    --val_spk2utt ${data}/$noise_type/dev/single.wav.scp \
     ${checkpoint:+--checkpoint $checkpoint}
 fi
 
@@ -102,7 +101,7 @@ if [ ${stage} -le 4 ] && [ ${stop_stage} -ge 4 ]; then
     --src_path $exp_dir/models \
     --num ${num_avg} \
     --mode best \
-    --epochs "138,141"
+    --epochs "141,143,145,147,149"
 fi
 if [ -z "${checkpoint}" ] && [ -f "${exp_dir}/models/avg_best_model.pt" ]; then
   checkpoint="${exp_dir}/models/avg_best_model.pt"
@@ -117,17 +116,18 @@ if [ ${stage} -le 5 ] && [ ${stop_stage} -ge 5 ]; then
     --gpus 0 \
     --exp_dir ${exp_dir} \
     --data_type "${data_type}" \
-    --test_data ${data}/test/${data_type}.list \
-    --test_spk1_enroll ${data}/test/spk1.enroll \
-    --test_spk2_enroll ${data}/test/spk2.enroll \
-    --test_spk2utt ${data}/test/single.wav.scp \
+    --test_data ${data}/$noise_type/test/${data_type}.list \
+    --test_spk1_enroll ${data}/$noise_type/test/spk1.enroll \
+    --test_spk2_enroll ${data}/$noise_type/test/spk2.enroll \
+    --test_spk2utt ${data}/$noise_type/test/single.wav.scp \
     --save_wav ${save_results} \
     ${checkpoint:+--checkpoint $checkpoint}
 fi
 
 if [ ${stage} -le 6 ] && [ ${stop_stage} -ge 6 ]; then
   echo "Start scoring ..."
-  ./tools/score.sh --dset "${data}/test" \
+  num_gpus=$(echo $gpus | awk -F ',' '{print NF}')
+  ./tools/score.sh --dset "${data}/$noise_type/test" \
     --exp_dir "${exp_dir}" \
     --fs ${fs} \
     --use_pesq "${use_pesq}" \

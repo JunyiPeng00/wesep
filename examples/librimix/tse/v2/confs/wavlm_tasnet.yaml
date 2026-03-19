@@ -12,7 +12,7 @@ dataset_args:
   shuffle_args:
     shuffle_size: 2500
   chunk_len: 48000
-  speaker_feat: &speaker_feat True
+  speaker_feat: &speaker_feat false
   fbank_args:
     num_mel_bins: 80
     frame_shift: 10
@@ -44,21 +44,22 @@ model_args:
   tse_model:
     # ------------- WavLM Frontend -------------
     wavlm_name: wavlm_base
-    wavlm_ckpt: /Users/pengjy/Interspeech2026/DynamicPruning/wespeaker_hubert/examples/voxceleb/v4_pruning/convert/wavlm_base.hf.pth
+    wavlm_ckpt: /path/to/convert/wavlm_base_plus.hf.pth
     wavlm_frozen: true
 
     # ------- TasNet DeepEncoder/DeepDecoder ----
-    encoder_dim: 512           # N
-    bottleneck_dim: 256        # B
+    encoder_dim: 256           # N
     kernel_size: 320           # 20 ms @ 16 kHz
     stride: 160                # 10 ms @ 16 kHz
 
     # -------- Separator / Speaker TCN ---------
-    sep_tcn_channels: 256
+    sep_tcn_channels: 512
+    post_fuse_tcn_X: 3
+    post_fuse_tcn_R: 2
     spk_emb_dim: 256
 
     # Placeholder flags for dataset/training script compatibility
-    joint_training: false
+    joint_training: true
     multi_task: false
 
 model_init:
@@ -72,7 +73,7 @@ optimizer:
 optimizer_args:
   tse_model:
     lr: 0.001            # Effective initial lr is set by scheduler_args
-    weight_decay: 0.0001
+    weight_decay: 0.00001
 
 clip_grad: 5.0
 save_epoch_interval: 1

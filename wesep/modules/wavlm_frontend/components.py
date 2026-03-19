@@ -397,7 +397,9 @@ class WavLMSelfAttention(SelfAttention):
 
         attn_mask = attn_mask_rel_pos
         if attention_mask is not None:
-            attn_mask = attn_mask + attention_mask
+            # When relative position bias is disabled, attn_mask_rel_pos is None.
+            # In that case, pass the external attention_mask directly.
+            attn_mask = attention_mask if attn_mask is None else (attn_mask + attention_mask)
         if key_padding_mask is not None:
             attn_mask = attn_mask.masked_fill(
                 key_padding_mask.reshape(bsz, 1, 1, seq_len), float("-inf")

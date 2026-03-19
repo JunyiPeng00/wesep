@@ -12,7 +12,7 @@ dataset_args:
   shuffle_args:
     shuffle_size: 2500
   chunk_len: 48000
-  speaker_feat: &speaker_feat True
+  speaker_feat: &speaker_feat false
   fbank_args:
     num_mel_bins: 80
     frame_shift: 10
@@ -37,22 +37,26 @@ model:
 model_args:
   tse_model:
     wavlm_name: wavlm_base
-    wavlm_ckpt: /Users/pengjy/Interspeech2026/DynamicPruning/wespeaker_hubert/examples/voxceleb/v4_pruning/convert/wavlm_base.hf.pth
+    wavlm_ckpt: /path/to/wavlm_base_plus.hf.pth
     wavlm_frozen: true
 
     encoder_dim: 512
-    bottleneck_dim: 256
     kernel_size: 320
     stride: 160
 
     sep_tcn_channels: 256
-    num_tcn_layers: 3
+    post_fuse_tcn_X: 4
+    post_fuse_tcn_R: 2
     num_hybrid_blocks: 5
     qkb_threshold: 0.5
     hybrid_mask_asymmetric: false
+    spk_emb_dim: 256
 
     sample_rate: 16000
     silence_seconds: 1.0
+
+    joint_training: true
+    speaker_feat: false
 
 model_init:
   tse_model: null

@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from wesep.modules.tasnet import DeepEncoder, DeepDecoder
 from wesep.modules.tasnet.convs import Conv1D
 from wesep.modules.dpccn.convs import TCNBlock
+from wesep.modules.ssl_backend import SSL_BACKEND_MHFA
 from wesep.modules.wavlm_frontend import WavLMFrontendConfig
 from wesep.modules.wavlm_frontend.model import wav2vec2_model
 
@@ -30,18 +30,19 @@ class WavLMDynamicTasNetConfig:
     wavlm_frozen: bool = True
 
     encoder_dim: int = 512
-    bottleneck_dim: int = 256
     kernel_size: int = 320
     stride: int = 160
 
     sep_tcn_channels: int = 256
-    num_tcn_layers: int = 3
+    post_fuse_tcn_X: int = 3
+    post_fuse_tcn_R: int = 1
     num_hybrid_blocks: int = 5
     sample_rate: int = 16000
     silence_seconds: float = 1.0
     frame_stride: int = WAVLM_FRAME_STRIDE
     qkb_threshold: float = 0.5
     hybrid_mask_asymmetric: bool = False
+    spk_emb_dim: int = 256
 
 
 class LayerWeightedSum(nn.Module):
@@ -55,20 +56,26 @@ class LayerWeightedSum(nn.Module):
         return out
 
 
-def _compute_qkb_bias(
+def _compute_soft_qkb_bias(
     x_mix: torch.Tensor,
     spk_emb: torch.Tensor,
-    threshold: Union[float, torch.Tensor],
+    scale: torch.Tensor,
 ) -> torch.Tensor:
+    """Continuous, differentiable QKB attention bias.
+
+    For each key position j, the bias is ``scale * cos_sim(x_mix[j], spk_emb)``.
+    Positive bias (target-like frames) encourages attention; negative bias
+    (interferer-dominated frames) suppresses it — with smooth gradients
+    everywhere, unlike the original hard-threshold variant.
+
+    Returns shape [B, 1, 1, T_mix] which broadcasts to [B, H, T_q, T_k].
+    """
     B, T_mix, C = x_mix.shape
     x_n = F.normalize(x_mix, dim=-1)
     spk_n = F.normalize(spk_emb, dim=-1)
-    cos_sim = torch.einsum("btc,bc->bt", x_n, spk_n)
-    s_t = torch.sigmoid(cos_sim)
-    M = s_t < threshold
-    bias = torch.zeros(B, 1, T_mix, T_mix, device=x_mix.device, dtype=x_mix.dtype)
-    bias = bias.masked_fill(M.unsqueeze(1).unsqueeze(2).expand(B, 1, T_mix, T_mix), ATTN_MASK_NEG_INF)
-    return bias
+    cos_sim = torch.einsum("btc,bc->bt", x_n, spk_n)  # [B, T]
+    soft_bias = scale * cos_sim  # [B, T]
+    return soft_bias.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
 
 
 def _build_hybrid_attention_mask(
@@ -125,23 +132,78 @@ class WavLMDynamicSeparator(nn.Module):
         self.num_layers = len(self.upstream.encoder.transformer.layers)
         self.num_hybrid = min(cfg.num_hybrid_blocks, self.num_layers)
         self.layer_weight = LayerWeightedSum(self.num_layers + 1)
-        self.qkb_threshold = float(cfg.qkb_threshold)
+        self.qkb_scale = nn.Parameter(torch.tensor(5.0))
         self.hybrid_mask_asymmetric = getattr(cfg, "hybrid_mask_asymmetric", False)
+        # MHFA speaker backend: aggregates enroll features across hybrid
+        # layers (pre-transformer + num_hybrid) into a compact embedding.
+        self.mhfa_backend = SSL_BACKEND_MHFA(
+            head_nb=8,
+            feat_dim=self.feat_dim,
+            compression_dim=128,
+            embed_dim=cfg.spk_emb_dim,
+            nb_layer=self.num_hybrid + 1,
+            feature_grad_mult=1.0,
+        )
+        # Project MHFA embedding back to feat_dim for QKB cosine similarity.
+        self.spk_proj = nn.Linear(cfg.spk_emb_dim, self.feat_dim)
+
         self.mix_proj = Conv1D(self.feat_dim, cfg.sep_tcn_channels, kernel_size=1)
-        self.tcn = nn.Sequential(*[
-            TCNBlock(
-                in_dims=cfg.sep_tcn_channels,
-                out_dims=cfg.sep_tcn_channels,
-                kernel_size=3,
-                dilation=2**i,
-                causal=False,
-            )
-            for i in range(cfg.num_tcn_layers)
-        ])
+
+        # Learnable 2× upsampling: 20 ms → 10 ms resolution.
+        # Initialized to bilinear interpolation so training starts from the
+        # same point as F.interpolate(mode='linear').
+        self.upsample = nn.ConvTranspose1d(
+            cfg.sep_tcn_channels, cfg.sep_tcn_channels,
+            kernel_size=4, stride=2, padding=1, bias=False,
+        )
+        self._init_upsample_bilinear()
+
+        # 20ms-resolution TCN stack: dilations 1→2→4→8 give ~300 ms
+        # receptive field at 20 ms frame rate before upsampling to 10 ms.
+        self.sep_tcn_20ms = nn.Sequential(
+            TCNBlock(cfg.sep_tcn_channels, cfg.sep_tcn_channels, kernel_size=3, dilation=1, causal=False),
+            TCNBlock(cfg.sep_tcn_channels, cfg.sep_tcn_channels, kernel_size=3, dilation=2, causal=False),
+            TCNBlock(cfg.sep_tcn_channels, cfg.sep_tcn_channels, kernel_size=3, dilation=4, causal=False),
+            TCNBlock(cfg.sep_tcn_channels, cfg.sep_tcn_channels, kernel_size=3, dilation=8, causal=False),
+        )
+
+        post_fuse_x = cfg.post_fuse_tcn_X
+        post_fuse_r = cfg.post_fuse_tcn_R
+        if post_fuse_x <= 0:
+            raise ValueError(f"post_fuse_tcn_X must be > 0, got {post_fuse_x}")
+        if post_fuse_r <= 0:
+            raise ValueError(f"post_fuse_tcn_R must be > 0, got {post_fuse_r}")
+
+        tcn_blocks: List[nn.Module] = []
+        for _ in range(post_fuse_r):
+            for i in range(post_fuse_x):
+                tcn_blocks.append(
+                    TCNBlock(
+                        in_dims=cfg.sep_tcn_channels,
+                        out_dims=cfg.sep_tcn_channels,
+                        kernel_size=3,
+                        dilation=2**i,
+                        causal=False,
+                    )
+                )
+        self.tcn = nn.Sequential(*tcn_blocks)
         self.mask_head = Conv1D(cfg.sep_tcn_channels, cfg.encoder_dim, kernel_size=1)
 
     def _output_size(self) -> int:
         return 1024 if "large" in self.cfg.wavlm_name.lower() else 768
+
+    @torch.no_grad()
+    def _init_upsample_bilinear(self) -> None:
+        """Initialize ConvTranspose1d to bilinear interpolation so training
+        starts from the same point as F.interpolate(mode='linear')."""
+        w = self.upsample.weight
+        w.zero_()
+        k = w.shape[-1]
+        factor = (k + 1) // 2
+        center = factor - 0.5 if k % 2 == 0 else factor - 1.0
+        filt = 1.0 - torch.abs(torch.arange(k, dtype=w.dtype) - center) / factor
+        for i in range(w.shape[0]):
+            w[i, i, :] = filt
 
     def _get_frame_indices(
         self,
@@ -180,28 +242,40 @@ class WavLMDynamicSeparator(nn.Module):
         x = self.upstream.encoder.transformer._preprocess(x)
         position_bias = None
         mix_outputs: List[torch.Tensor] = [x[:, mix_start_frame:, :]]
+        enroll_feats: List[torch.Tensor] = [x[:, :enroll_end_frame, :]]
 
         for i, layer in enumerate(self.upstream.encoder.transformer.layers):
             if i < self.num_hybrid:
                 attn_mask = hybrid_mask
                 x, position_bias = layer(x, attn_mask, position_bias=position_bias)
+                enroll_feats.append(x[:, :enroll_end_frame, :])
                 if i == self.num_hybrid - 1:
-                    spk_emb = x[:, :enroll_end_frame, :].mean(dim=1)
+                    # MHFA over hybrid layers: [B, T_enroll, D, L] → [B, D, T_enroll, L]
+                    enroll_stack = torch.stack(enroll_feats, dim=-1).transpose(1, 2)
+                    spk_emb = self.mhfa_backend(enroll_stack)  # [B, spk_emb_dim]
+                    spk_emb_qkb = self.spk_proj(spk_emb)       # [B, feat_dim]
                     x_mix = x[:, mix_start_frame:, :].contiguous()
                     position_bias = None
                 mix_outputs.append(x[:, mix_start_frame:, :])
             else:
-                b_qkb = _compute_qkb_bias(x_mix, spk_emb, self.qkb_threshold)
+                b_qkb = _compute_soft_qkb_bias(x_mix, spk_emb_qkb, self.qkb_scale)
                 x_mix, position_bias = layer(x_mix, b_qkb, position_bias=position_bias)
                 mix_outputs.append(x_mix)
 
         mix_feat = self.layer_weight(mix_outputs)
-        mix_feat = mix_feat.transpose(1, 2)
-        mix_feat = self.mix_proj(mix_feat)
-        mix_feat_10 = F.interpolate(mix_feat, size=T_enc, mode="linear", align_corners=False)
+        mix_feat = mix_feat.transpose(1, 2)  # [B, C, T_20]
+        mix_feat = self.mix_proj(mix_feat)    # [B, sep_C, T_20]
+        mix_feat = self.sep_tcn_20ms(mix_feat)  # 20ms-resolution context
+        mix_feat_10 = self.upsample(mix_feat)  # learnable 2x upsample
+        if mix_feat_10.size(-1) > T_enc:
+            mix_feat_10 = mix_feat_10[..., :T_enc]
+        elif mix_feat_10.size(-1) < T_enc:
+            mix_feat_10 = F.pad(mix_feat_10, (0, T_enc - mix_feat_10.size(-1)))
         for blk in self.tcn:
             mix_feat_10 = blk(mix_feat_10)
-        m = torch.sigmoid(self.mask_head(mix_feat_10))
+        # ReLU mask: [0, +inf) allows amplification of suppressed target
+        # components, overcoming sigmoid's [0, 1] upper bound.
+        m = F.relu(self.mask_head(mix_feat_10))
         if m.size(-1) != T_enc:
             m = F.interpolate(m, size=T_enc, mode="linear", align_corners=False)
         return m, spk_emb
@@ -228,37 +302,53 @@ class WavLMDynamicSeparator(nn.Module):
 
         x = self.upstream.encoder.transformer._preprocess(x)
         position_bias = None
+        enroll_feats: List[torch.Tensor] = [x[:, :enroll_end_frame, :]]
         for i, layer in enumerate(self.upstream.encoder.transformer.layers):
             if i >= self.num_hybrid:
                 break
             attn_mask = hybrid_mask
             x, position_bias = layer(x, attn_mask, position_bias=position_bias)
-        spk_emb = x[:, :enroll_end_frame, :].mean(dim=1)
+            enroll_feats.append(x[:, :enroll_end_frame, :])
+        enroll_stack = torch.stack(enroll_feats, dim=-1).transpose(1, 2)
+        spk_emb = self.mhfa_backend(enroll_stack)  # [B, spk_emb_dim]
         return spk_emb
 
 
 class WavLMDynamicTasNet(nn.Module):
-    def __init__(self, cfg: WavLMDynamicTasNetConfig) -> None:
+    def __init__(self, cfg: Optional[WavLMDynamicTasNetConfig] = None, **kwargs) -> None:
         super().__init__()
+        if cfg is None:
+            for key in ("joint_training", "speaker_feat"):
+                kwargs.pop(key, None)
+            cfg = WavLMDynamicTasNetConfig(**kwargs)
         self.cfg = cfg
 
-        self.encoder = DeepEncoder(
+        self.encoder = nn.Conv1d(
             in_channels=1,
             out_channels=cfg.encoder_dim,
             kernel_size=cfg.kernel_size,
             stride=cfg.stride,
+            bias=False,
         )
-        self.decoder = DeepDecoder(
-            N=cfg.encoder_dim,
+        self.decoder = nn.ConvTranspose1d(
+            in_channels=cfg.encoder_dim,
+            out_channels=1,
             kernel_size=cfg.kernel_size,
             stride=cfg.stride,
+            bias=False,
         )
         self.separator = WavLMDynamicSeparator(cfg)
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 2:
             x = x.unsqueeze(1)
+        assert x.ndim == 3, f"Expected encoder input [B, 1, T], got {tuple(x.shape)}"
         return self.encoder(x)
+
+    def _decode(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.ndim == 3, f"Expected decoder input [B, N, T_enc], got {tuple(x.shape)}"
+        y = self.decoder(x)  # [B, 1, T_out]
+        return y.squeeze(1)  # [B, T_out]
 
     def _default_mix_start(self, enroll_len: int) -> int:
         return enroll_len + int(self.cfg.silence_seconds * self.cfg.sample_rate)
@@ -281,7 +371,7 @@ class WavLMDynamicTasNet(nn.Module):
         enc_mix = self._encode(mix_wav)
         m, spk_emb = self.separator(wav, enroll_len, mix_start, enc_mix)
         masked_enc = enc_mix * m
-        est = self.decoder(masked_enc)
+        est = self._decode(masked_enc)
 
         if est.size(-1) > T_m:
             est = est[..., :T_m]

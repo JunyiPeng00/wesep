@@ -9,7 +9,7 @@ import warnings
 # Add the project root to the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../../..'))
 
-from wespeaker.frontend.wav2vec2.convert_hf_ssl_models import convert_hf_ssl_model
+from wesep.modules.wavlm_frontend.convert_hf_ssl_models import convert_hf_ssl_model
 
 def download_models():
     """Download and convert models from Hugging Face."""
