@@ -1,0 +1,20 @@
+# In-context enrollment (S4): frozen WavLM Base+, enrollment and mixture jointly encoded
+# through layer d=4 with bidirectional attention (joint_mask_mode: full). The MHFA embedding
+# of the layer-4 enrollment frames (spk_readout_layer: 0 means r=d) conditions layers 5-12
+# (key bias + input shift, use_kv_bias) and the BSRNN extractor (FiLM).
+# batch_size is per GPU: keep num_gpus x batch_size = 64 (reported run: 16 x 4).
+# Relative paths are resolved against the recipe directory (run.sh creates them).
+seed: 42
+exp_dir: exp/in_context_bi_d4
+gpus: "0"
+data_type: shard
+whole_utt: false
+repeat_dataset: true
+dataloader_args: {batch_size: 4, drop_last: true, num_workers: 2, pin_memory: false}
+dataset_args: {resample_rate: 16000, sample_num_per_epoch: 0, shuffle: true, shuffle_args: {shuffle_size: 2500}, chunk_len: 48000, speaker_feat: false}
+model: {tse_model: WavLMDSTBSRNN}
+model_args: {tse_model: {wavlm_name: wavlm_base_plus, wavlm_ckpt: convert/wavlm_base_plus.hf.pth, wavlm_frozen: true, sr: 16000, sample_rate: 16000, silence_seconds: 0.1, frame_stride: 320, win: 512, stride: 128, feature_dim: 128, num_repeat: 6, use_bidirectional: true, spk_emb_dim: 256, external_spk_dim: 192, spk_fuse_type: FiLM, multi_fuse: true, stage_mode: fixed_stage, fixed_joint_depth: 4, spk_readout_layer: 0, joint_mask_mode: full, use_kv_bias: true, kv_bias_scale: 1.0, lambda_c: 0.0, lambda_s: 0.0, lambda_p: 0.0, joint_training: true, multi_task: false, speaker_feat: false}}
+train: {lr: 1.0e-3, min_lr: 2.5e-5, weight_decay: 1.0e-2, warmup_steps: 5000, num_epochs: 150, grad_clip: 5.0, precision: fp32, log_interval: 10, early_stop_patience: 100}
+speaker_encoder: {enabled: true, use_for_separator: false, model_name: ECAPA_TDNN_GLOB_c512, ckpt_path: wespeaker_models/voxceleb_ECAPA512/avg_model.pt, embed_dim: 192, feat_dim: 80, pooling_func: ASTP, freeze: true}
+eval: {save_wav: true, wav_format: tar, save_roles: [est], speaker_meta_path: ""}
+paths: {train_data: data/clean/train-100/shard.list, train_utt2spk: data/clean/train-100/single.utt2spk, train_spk2utt: data/clean/train-100/spk2enroll.json, val_data: data/clean/dev/shard.list, val_spk1_enroll: data/clean/dev/spk1.enroll, val_spk2_enroll: data/clean/dev/spk2.enroll, val_spk2utt: data/clean/dev/single.wav.scp, test_data: data/clean/test/shard.list, test_spk1_enroll: data/clean/test/spk1.enroll, test_spk2_enroll: data/clean/test/spk2.enroll, test_spk2utt: data/clean/test/single.wav.scp}
