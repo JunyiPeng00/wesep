@@ -39,7 +39,8 @@ No trained checkpoint is released.
 ## Requirements
 
 Tested with Python 3.12 and PyTorch/torchaudio 2.6.0 (ROCm 6.2.4 build). Also needed:
-`pyyaml`, `tensorboard`, `soundfile`, `mir_eval`, `pesq`, `pystoi`, `transformers` and
+`pyyaml`, `tensorboard`, `soundfile`, `librosa`, `scipy`, `kaldiio`, `lmdb`, `auraloss`,
+`torchmetrics`, `mir_eval`, `pesq`, `pystoi`, `transformers` and
 `huggingface_hub` (stage 3 only), and `wespeaker`
 (`pip install git+https://github.com/wenet-e2e/wespeaker.git`) for the frozen ECAPA-TDNN
 speaker encoder. Instead of installing wespeaker, `WESPEAKER_ROOT` can point to a local
@@ -76,18 +77,20 @@ All commands run from this directory.
    (`use_for_separator: false`, `lambda_p: 0`). It is built in training, which keeps the
    random-number stream of the reported run, and in evaluation it gives the `spk_cos` and
    `target_interferer_spk_cos` columns of `predictions.jsonl`.
-4. Training (stage 4), evaluation (stage 5) and summary (stage 6):
+4. Training (stage 4), evaluation (stage 5) and summary (stage 6).
+   `batch_size` in the config is per GPU. The reported run used a global batch of 64
+   (2 nodes x 8 GPUs x 4); keep `nodes x GPUs x batch_size = 64`, because the number of
+   steps per epoch and the learning-rate schedule follow from it. On a single node with
+   8 GPUs, first set `batch_size: 8` in `confs/in_context_bi_d4.yaml`, then run:
 
    ```bash
    bash run.sh --stage 4 --stop_stage 6 --gpus 0,1,2,3,4,5,6,7
    ```
 
-   `batch_size` in the config is per GPU. The reported run used a global batch of 64
-   (2 nodes x 8 GPUs x 4); keep `nodes x GPUs x batch_size = 64`, e.g. 8 GPUs with
-   `batch_size: 8`, because the number of steps per epoch and the learning-rate schedule
-   follow from it. For several nodes, run the same command on every node with
-   `--nnodes N --node_rank i --master_addr <host> --master_port <port>` (the experiment
-   directory must be on a shared file system). Resume with `--checkpoint exp/.../models/latest.pt`.
+   For several nodes, keep `batch_size: 4` (2 nodes x 8 GPUs) and run the same command on
+   every node with `--nnodes N --node_rank i --master_addr <host> --master_port <port>`
+   (the experiment directory must be on a shared file system).
+   Resume with `--checkpoint exp/.../models/latest.pt`.
    Evaluation uses `models/best.pt` and writes `eval_test/predictions.jsonl` and
    `eval_test/metrics.json`; `summarize.py` adds FR.
 
@@ -115,7 +118,8 @@ With `eval.save_wav: true` the estimates are written to `eval_test/audio.tar` (a
 ## Notes for AMD ROCm
 
 The code runs on CUDA and ROCm builds of PyTorch. On ROCm, `train.py` gives every rank its
-own MIOpen cache directory under `/tmp`. On GPU, the LSTMs in the extractor run with
+own MIOpen cache directory under `$SLURM_TMPDIR` or `/tmp` (created on CUDA as well, where
+it is unused). On GPU, the LSTMs in the extractor run with
 cuDNN/MIOpen disabled, as in the reported run.
 
 ## Citation

@@ -108,10 +108,11 @@ def resolve_config_paths(config: dict[str, Any], config_path: Path) -> dict[str,
 
 
 def _setup_per_rank_miopen_cache(local_rank: int) -> None:
-    """Per-rank MIOpen cache directory under /tmp (ROCm only; no effect on CUDA).
+    """Per-rank MIOpen cache directory under $SLURM_TMPDIR or /tmp.
 
-    The path contains a node and a local-rank component, so workers never share
-    a cache directory. MIOpen reads these variables at the first convolution.
+    Called on every platform; the directory and variables are only read by
+    MIOpen (ROCm) and are unused on CUDA. The path contains a node and a
+    local-rank component, so workers never share a cache directory.
     """
     job_id = os.environ.get("SLURM_JOB_ID", "0")
     user = os.environ.get("USER", "user")
@@ -805,7 +806,7 @@ def main() -> None:
                 scheduler=scheduler,
                 global_step=global_step,
                 epoch=epoch,
-                best_val_si_sdri=best_val_si_sdri,
+                best_val_si_sdri=max(best_val_si_sdri, metrics["val_si_sdri"]),
                 config=config,
             )
         if metrics["val_si_sdri"] > best_val_si_sdri:

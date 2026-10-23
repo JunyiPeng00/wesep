@@ -12,8 +12,8 @@ stop_stage=6
 
 # Data preparation
 mix_data_path=/path/to/Libri2Mix/wav16k/min
-data=data
-noise_type=clean
+data=data             # if changed, also update the paths in the config
+noise_type=clean      # if changed, also update the paths in the config
 num_utts_per_shard=100
 
 # Training / evaluation
