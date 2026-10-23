@@ -7,6 +7,7 @@ import wesep.models.wavlm_tasnet as wavlm_tasnet
 import wesep.models.wavlm_dynamic_tasnet as wavlm_dynamic_tasnet
 import wesep.models.bsrnn_multi_optim as bsrnn_multi
 import wesep.models.bsrnn_feats as bsrnn_feats
+import wesep.models.wavlm_dst_bsrnn as wavlm_dst_bsrnn
 
 
 def get_model(model_name: str):
@@ -28,6 +29,8 @@ def get_model(model_name: str):
         return getattr(wavlm_tasnet, model_name)
     elif model_name.startswith("WavLMDynamicTasNet"):
         return getattr(wavlm_dynamic_tasnet, model_name)
+    elif model_name.startswith("WavLMDSTBSRNN"):
+        return getattr(wavlm_dst_bsrnn, model_name)
     else:  # model_name error !!!
         print(model_name + " not found !!!")
         exit(1)
